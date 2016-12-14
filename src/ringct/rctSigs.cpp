@@ -57,27 +57,39 @@ namespace rct {
     
     //Schnorr Non-linkable
     //Gen Gives a signature (L1, s1, s2) proving that the sender knows "x" such that xG = one of P1 or P2
+    //  * takes x, P1, P2 and index s.t. x*G = P_i
     //Ver Verifies that signer knows an "x" such that xG = one of P1 or P2
     //These are called in the below ASNL sig generation    
-    
     void GenSchnorrNonLinkable(key & L1, key & s1, key & s2, const key & x, const key & P1, const key & P2, unsigned int index) {
         key c1, c2, L2;
+        // a <- rand()
         key a = skGen();
         if (index == 0) {
+            // L1 = a * G
             scalarmultBase(L1, a);
+            // c2 = H(L1)
             hash_to_scalar(c2, L1);
+            // s2 <- rand()
             skGen(s2);
+            // L2 = s2*G + c2*P2
             addKeys2(L2, s2, c2, P2);
+            // c1 = H(L2)
             hash_to_scalar(c1, L2);
             //s1 = a - x * c1
             sc_mulsub(s1.bytes, x.bytes, c1.bytes, a.bytes);
         }
         else if (index == 1) {
+            // L2 = a * G
             scalarmultBase(L2, a);
+            // c1 = H(L2)
             hash_to_scalar(c1, L2);
+            // s1 <- rand()
             skGen(s1);
+            // L1 = s1*G + c1*P
             addKeys2(L1, s1, c1, P1);
+            // c2 = H(L1)
             hash_to_scalar(c2, L1);
+            // s2 = a - x * c2
             sc_mulsub(s2.bytes, x.bytes, c2.bytes, a.bytes);
         }
         else {
@@ -91,9 +103,13 @@ namespace rct {
     //These are called in the below ASNL sig generation        
     bool VerSchnorrNonLinkable(const key & P1, const key & P2, const key & L1, const key & s1, const key & s2) {
         key c2, L2, c1, L1p;
+        // c2 = H(L1)
         hash_to_scalar(c2, L1);
+        // L2 = s2 * G + c2 * P2
         addKeys2(L2, s2, c2, P2);
+        // c1 = H(L2)
         hash_to_scalar(c1, L2);
+        // L1p = s1 * G + c1 * P1
         addKeys2(L1p, s1, c1, P1);
         
         return equalKeys(L1, L1p);
@@ -318,24 +334,34 @@ namespace rct {
     //   mask is a such that C = aG + bH, and b = amount
     //verRange verifies that \sum Ci = C and that each Ci is a commitment to 0 or 2^i
     rangeSig proveRange(key & C, key & mask, const xmr_amount & amount) {
+        // mask <- 0
         sc_0(mask.bytes);
+        // C <- identity
         identity(C);
+        // b = unsigned int[64]
         bits b;
+        // b <- bits(amount)
         d2b(b, amount);
         rangeSig sig;
         key64 ai;
         key64 CiH;
         int i = 0;
         for (i = 0; i < ATOMS; i++) {
+            // ai[i] <- rand
             skGen(ai[i]);
             if (b[i] == 0) {
+                // sig.Ci[i] = ai[i]*G
                 scalarmultBase(sig.Ci[i], ai[i]);
             }
             if (b[i] == 1) {
+                // sig.Ci[i] = ai[i]*G + H2[i]
                 addKeys1(sig.Ci[i], ai[i], H2[i]);
             }
+            // CiH[i] = sig.Ci[i] - H2[i]
             subKeys(CiH[i], sig.Ci[i], H2[i]);
+            // mask = mask + ai[i]
             sc_add(mask.bytes, mask.bytes, ai[i].bytes);
+            // C = C + sig.Ci[i]
             addKeys(C, C, sig.Ci[i]);
         }
         sig.asig = GenASNL(ai, sig.Ci, CiH, b);
