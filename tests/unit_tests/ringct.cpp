@@ -1069,3 +1069,137 @@ TEST(ringct, reject_gen_non_simple_ver_simple)
   rct::rctSig sig = make_sample_rct_sig(NELTS(inputs), inputs, NELTS(outputs), outputs, true);
   ASSERT_FALSE(rct::verRctSimple(sig));
 }
+
+asnlSig GenASNLSuper(key64 x, key64 P1, key64 P2, bits indices) {
+    DP("Generating Aggregate Schnorr Non-linkable Ring Signature\n");
+    key64 s1;
+    int j = 0;
+    asnlSig rv;
+    rv.s = zero();
+    for (j = 0; j < ATOMS - 2; j++) {
+        GenSchnorrNonLinkable(rv.L1[j], s1[j], rv.s2[j], x[j], P1[j], P2[j], indices[j]);
+        sc_add(rv.s.bytes, rv.s.bytes, s1[j].bytes);
+    }
+
+    key a = skGen();
+    key c1, c2, L2;
+    if (indices[ATOMS-2] == 0) {
+        scalarmultBase(rv.L1[ATOMS-1], a);
+        skGen(rv.s2[ATOMS-1]);
+        // rv.L1[ATOMS-2] = H(s2[ATOMS-1]*G + H(rv.L1[ATOMS-1])*P2[ATOMS-1])*P1[ATOMS-1]
+        hash_to_scalar(c2, rv.L1[ATOMS-1]);
+        addKeys2(L2, rv.s2[ATOMS-1], c2, P2[ATOMS-1]);
+        hash_to_scalar(c1, L2);
+        scalarmultKey(rv.L1[ATOMS-2], P1[ATOMS-1], c1);
+
+        skGen(rv.s2[ATOMS-2]);
+
+        //s1 = a - H(s2[ATOMS - 2]*G + H(L1[ATOMS - 2])*P2[ATOMS-2])*x[ATOMS-2];
+        hash_to_scalar(c2, rv.L1[ATOMS-2]);
+        addKeys2(L2, rv.s2[ATOMS-2], c2, P2[ATOMS-2]);
+        hash_to_scalar(c1, L2);
+        sc_mulsub(s1[ATOMS-2].bytes, x[ATOMS-2].bytes, c1.bytes, a.bytes);
+    } else if (indices[ATOMS-2] == 1) {
+        scalarmultBase(L2, a);
+        //L1[ATOMS-1] = s1[ATOMS-2]*G + H(L2)*P1[ATOMS - 2];
+        hash_to_scalar(c1, L2);
+        s1[ATOMS-2] = skGen();
+        addKeys2(rv.L1[ATOMS-1], s1[ATOMS-2], c1, P1[ATOMS-2]);
+
+        //L1[ATOMS-2] = H(s2[ATOMS-1]*G + H(L1[ATOMS-1])P2[ATOMS-1])P1[ATOMS-1]
+        rv.s2[ATOMS-1] = skGen();
+        hash_to_scalar(c2, rv.L1[ATOMS-1]);
+        addKeys2(L2, rv.s2[ATOMS-1], c2, P2[ATOMS-1]);
+        hash_to_scalar(c1, L2);
+        scalarmultKey(rv.L1[ATOMS-2], P1[ATOMS-1], c1);
+        key c3;
+        hash_to_scalar(c3, rv.L1[ATOMS-2]);
+        //s2[ATOMS-2] = a - H(L1[ATOMS-2])x;
+        sc_mulsub(rv.s2[ATOMS-2].bytes, x[ATOMS-2].bytes, c3.bytes, a.bytes);
+    }
+    sc_add(rv.s.bytes, rv.s.bytes, s1[ATOMS-2].bytes);
+
+    return rv;
+}
+
+rangeSig proveRangeSuper(key & C, key & mask, key & amount) {
+    // mask <= 0
+    sc_0(mask.bytes);
+    // C <- identity
+    identity(C);
+    // b = unsigned int[64]
+    bits b;
+    // truncate amount to 64 bits
+    xmr_amount truncated_amount = h2d(amount);
+    // b <- bits(truncated_amount)
+    d2b(b, truncated_amount);
+    rangeSig sig;
+    key64 ai;
+    key64 CiH;
+    int i = 0;
+    // compute subcommitments ("pubkeys") for all but last bit
+    for (i = 0; i < ATOMS - 1; i++) {
+        // ai[i] <- rand
+        skGen(ai[i]);
+        if (b[i] == 0) {
+            // sig.Ci[i] = ai[i]*G
+            scalarmultBase(sig.Ci[i], ai[i]);
+        }
+        if (b[i] == 1) {
+            // sig.Ci[i] = ai[i]*G + H2[i]
+            addKeys1(sig.Ci[i], ai[i], H2[i]);
+        }
+        // CiH[i] = sig.Ci[i] - H2[i]
+        subKeys(CiH[i], sig.Ci[i], H2[i]);
+        // mask = mask + ai[i]
+        sc_add(mask.bytes, mask.bytes, ai[i].bytes);
+        // C = C + sig.Ci[i]
+        addKeys(C, C, sig.Ci[i]);
+    }
+    i = ATOMS - 1;
+    skGen(ai[i]);
+    // remove bits already accounted for from amount
+    key amount_without_int63 = amount;
+    for(int j = 0; j < 7; j++) {
+        amount_without_int63[j] = 0;
+    }
+    amount_without_int63[7] = amount_without_int63[7] & 0x80;
+
+    // create rest amount subcommitment
+    addKeys2(sig.Ci[i], ai[i], amount_without_int63, H);
+    subKeys(CiH[i], sig.Ci[i], H2[i]);
+    sc_add(mask.bytes, mask.bytes, ai[i].bytes);
+    addKeys(C, C, sig.Ci[i]);
+
+    sig.asig = GenASNLSuper(ai, sig.Ci, CiH, b);
+
+    return sig;
+}
+
+TEST(ringct, outofrange)
+{
+    for(int i = 0; i < 64; i++) {
+        key commitment;
+        key mask; // aka blinding
+        // pick random scalar for amount
+        key amount = skGen();
+        dp(amount);
+
+        // check commitment
+        rangeSig rsig = proveRangeSuper(commitment, mask, amount);
+        key Ctmp = identity();
+        key64 CiH;
+        for (int i = 0; i < ATOMS; i++) {
+            // CiH[i] = as.Ci[i] - 2^i*H
+            subKeys(CiH[i], rsig.Ci[i], H2[i]);
+            addKeys(Ctmp, Ctmp, rsig.Ci[i]);
+        }
+        ASSERT_TRUE(equalKeys(commitment, Ctmp));
+        key commitment2;
+        addKeys2(commitment2, mask, amount, H);
+        ASSERT_TRUE(equalKeys(commitment, commitment2));
+
+        // verify rangesig
+        ASSERT_TRUE(verRange(commitment, rsig));
+    }
+}
